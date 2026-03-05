@@ -1,0 +1,26 @@
+# Temporary files
+*.tmp
+*.temp
+*.log
+*.bak
+*.backup
+
+# Environment variables
+.env
+.env.local
+secrets.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# System
+.DS_Store
+Thumbs.db
+
+# Test directories
+/tmp/
+/test/
+/scratch/

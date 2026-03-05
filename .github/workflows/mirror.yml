@@ -1,0 +1,68 @@
+name: Mirror GitHub to GitLab
+
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mirror all repositories
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+          GL_PAT: ${{ secrets.GL_PAT }}
+          GH_USERNAME: ${{ secrets.GH_USERNAME }}
+          GL_USERNAME: ${{ secrets.GL_USERNAME }}
+        run: |
+          set -e
+
+          # Function to log safely (hiding tokens)
+          log() {
+            echo "$*" | sed -E "s|$GH_PAT|***|g; s|$GL_PAT|***|g"
+          }
+
+          log "Starting mirroring for user: $GH_USERNAME"
+
+          # Get all repos (handles pagination)
+          page=1
+          while :; do
+            repos=$(curl -s -H "Authorization: token $GH_PAT" \
+              "https://api.github.com/user/repos?per_page=100&page=$page&type=all")
+            
+            # Stop if no more repos
+            count=$(echo "$repos" | jq '. | length')
+            if [ "$count" -eq 0 ]; then break; fi
+
+            echo "$repos" | jq -r '.[] | "\(.name) \(.owner.login) \(.clone_url)"' | while read -r name owner clone_url; do
+              # Skip if not the owner or if it's the mirror repo itself
+              if [ "$owner" != "$GH_USERNAME" ] || [ "$name" == "repo_mirror" ]; then
+                continue
+              fi
+
+              log "Processing: $name"
+
+              # Create GitLab project (private) - ignore error if it already exists
+              curl -s -X POST "https://gitlab.com/api/v4/projects" \
+                -H "Authorization: Bearer $GL_PAT" \
+                -H "Content-Type: application/json" \
+                -d "{\"name\": \"$name\", \"visibility\": \"private\"}" > /dev/null
+
+              # Clone mirror
+              git clone --mirror "https://$GH_USERNAME:$GH_PAT@github.com/$GH_USERNAME/$name.git" "$name.git" --quiet
+
+              # Push mirror
+              cd "$name.git"
+              git push --mirror "https://oauth2:$GL_PAT@gitlab.com/$GL_USERNAME/$name.git" --quiet || log "Push failed for $name (maybe already exists or empty)"
+              cd ..
+
+              # Cleanup
+              rm -rf "$name.git"
+              log "Finished: $name"
+            done
+
+            page=$((page + 1))
+          done
+
+          log "Mirroring complete."
