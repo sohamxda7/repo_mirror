@@ -4,6 +4,9 @@ on:
   schedule:
     - cron: '0 2 * * *'
   workflow_dispatch:
+  push:
+    branches:
+      - main
 
 jobs:
   mirror:
@@ -20,7 +23,7 @@ jobs:
 
           # Function to log safely (hiding tokens)
           log() {
-            echo "$*" | sed -E "s|$GH_PAT|***|g; s|$GL_PAT|***|g"
+            echo "[$(date -u +'%Y-%m-%d %H:%M:%S')] $*" | sed -E "s|$GH_PAT|***|g; s|$GL_PAT|***|g"
           }
 
           log "Starting mirroring for user: $GH_USERNAME"
@@ -31,11 +34,11 @@ jobs:
             repos=$(curl -s -H "Authorization: token $GH_PAT" \
               "https://api.github.com/user/repos?per_page=100&page=$page&type=all")
             
-            # Stop if no more repos
-            count=$(echo "$repos" | jq '. | length')
+            # Stop if no more repos or error
+            count=$(echo "$repos" | jq '. | length' 2>/dev/null || echo "0")
             if [ "$count" -eq 0 ]; then break; fi
 
-            echo "$repos" | jq -r '.[] | "\(.name) \(.owner.login) \(.clone_url)"' | while read -r name owner clone_url; do
+            echo "$repos" | jq -r '.[] | "\(.name) \(.owner.login)"' | while read -r name owner; do
               # Skip if not the owner or if it's the mirror repo itself
               if [ "$owner" != "$GH_USERNAME" ] || [ "$name" == "repo_mirror" ]; then
                 continue
@@ -49,17 +52,22 @@ jobs:
                 -H "Content-Type: application/json" \
                 -d "{\"name\": \"$name\", \"visibility\": \"private\"}" > /dev/null
 
-              # Clone mirror
-              git clone --mirror "https://$GH_USERNAME:$GH_PAT@github.com/$GH_USERNAME/$name.git" "$name.git" --quiet
-
-              # Push mirror
-              cd "$name.git"
-              git push --mirror "https://oauth2:$GL_PAT@gitlab.com/$GL_USERNAME/$name.git" --quiet || log "Push failed for $name (maybe already exists or empty)"
-              cd ..
-
-              # Cleanup
-              rm -rf "$name.git"
-              log "Finished: $name"
+              # Clone mirror (quietly to avoid leaking metadata)
+              # If clone fails (e.g. empty repo), we log and continue
+              if git clone --mirror "https://$GH_USERNAME:$GH_PAT@github.com/$GH_USERNAME/$name.git" "$name.git" --quiet 2>/dev/null; then
+                cd "$name.git"
+                # Push mirror - we use || true to ensure one failure doesn't stop the whole job
+                # (Common failures: LFS objects missing on GitLab, empty repos, or size limits)
+                if ! git push --mirror "https://oauth2:$GL_PAT@gitlab.com/$GL_USERNAME/$name.git" --quiet 2>/dev/null; then
+                  log "Push failed for $name - possibly empty, LFS issues, or size limit."
+                else
+                  log "Successfully mirrored: $name"
+                fi
+                cd ..
+                rm -rf "$name.git"
+              else
+                log "Clone failed or repo is empty: $name"
+              fi
             done
 
             page=$((page + 1))
